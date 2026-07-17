@@ -8,7 +8,7 @@ use std::{
     ops::Bound,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use iroh::{KeyParsingError, PublicKey};
 use iroh_blobs::Hash;
 use n0_future::time::SystemTime;
@@ -49,6 +49,8 @@ use self::{
         RecordsValue, Tables, TransactionAndTables,
     },
 };
+
+const DEFAULT_AUTHOR_KEY: &str = "default-author";
 
 /// Manages the replicas and authors for an instance.
 #[derive(Debug)]
@@ -100,6 +102,27 @@ fn open_database(path: &std::path::Path) -> Result<Database> {
 }
 
 #[cfg(feature = "fs-store")]
+fn load_legacy_default_author(path: std::path::PathBuf) -> Result<Option<AuthorId>> {
+    use std::str::FromStr;
+
+    if !path.exists() {
+        return Ok(None);
+    }
+    let data = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "Failed to read the default author file at `{}`",
+            path.display()
+        )
+    })?;
+    AuthorId::from_str(&data).map(Some).with_context(|| {
+        format!(
+            "Failed to parse the default author from `{}`",
+            path.display()
+        )
+    })
+}
+
+#[cfg(feature = "fs-store")]
 fn is_redb_v2_tuple_mismatch(err: &anyhow::Error) -> bool {
     err.chain().any(|e| {
         matches!(
@@ -122,7 +145,7 @@ impl Store {
 
     /// Create or open a store using a redb database.
     pub fn from_database(db: Database) -> Result<Self> {
-        Self::new_impl(db)
+        Self::new_impl(db, None)
     }
 
     /// Create or open a store from a `path` to a database file.
@@ -131,15 +154,16 @@ impl Store {
     #[cfg(feature = "fs-store")]
     pub fn persistent(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let path = path.as_ref();
+        let default_author = load_legacy_default_author(path.with_file_name("default-author"))?;
         let db = open_database(path)?;
-        match Self::new_impl(db) {
+        match Self::new_impl(db, default_author) {
             Ok(store) => Ok(store),
             Err(err) if is_redb_v2_tuple_mismatch(&err) => {
                 #[cfg(feature = "redb-v2-migration")]
                 {
                     info!("redb 2.x tuple format detected, running migration");
                     migrate_redb_v2_tuples::run(path)?;
-                    Self::new_impl(open_database(path)?)
+                    Self::new_impl(open_database(path)?, default_author)
                 }
                 #[cfg(not(feature = "redb-v2-migration"))]
                 {
@@ -153,14 +177,14 @@ impl Store {
         }
     }
 
-    fn new_impl(db: redb::Database) -> Result<Self> {
+    fn new_impl(db: redb::Database, default_author: Option<AuthorId>) -> Result<Self> {
         // Setup all tables
         let write_tx = db.begin_write()?;
         let _ = Tables::new(&write_tx)?;
         write_tx.commit()?;
 
         // Run database migrations
-        migrations::run_migrations(&db)?;
+        migrations::run_migrations(&db, default_author)?;
 
         Ok(Store {
             db,
@@ -399,6 +423,42 @@ impl Store {
             tables
                 .authors
                 .insert(author.id().as_bytes(), &author.to_bytes())?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn default_author(&mut self) -> Result<Option<AuthorId>> {
+        let tables = self.tables()?;
+        let Some(value) = tables.config.get(DEFAULT_AUTHOR_KEY)? else {
+            return Ok(None);
+        };
+        let author: AuthorId = (*value.value()).into();
+        if tables.authors.get(author.as_bytes())?.is_none() {
+            bail!("The default author is missing from the docs store");
+        }
+        Ok(Some(author))
+    }
+
+    pub(crate) fn initialize_default_author(&mut self, author: Author) -> Result<AuthorId> {
+        let id = author.id();
+        self.modify(|tables| {
+            if let Some(value) = tables.config.get(DEFAULT_AUTHOR_KEY)? {
+                return Ok((*value.value()).into());
+            }
+            tables.authors.insert(id.as_bytes(), &author.to_bytes())?;
+            tables.config.insert(DEFAULT_AUTHOR_KEY, id.as_bytes())?;
+            Ok(id)
+        })
+    }
+
+    pub(crate) fn set_default_author(&mut self, author: AuthorId) -> Result<()> {
+        self.modify(|tables| {
+            if tables.authors.get(author.as_bytes())?.is_none() {
+                bail!("The author does not exist");
+            }
+            tables
+                .config
+                .insert(DEFAULT_AUTHOR_KEY, author.as_bytes())?;
             Ok(())
         })
     }
@@ -1289,6 +1349,22 @@ mod tests {
             assert_eq!(entries[0].0.value(), (&ns, key, &author));
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_default_author_in_database() -> Result<()> {
+        let dbfile = tempfile::NamedTempFile::new()?;
+        let database = redb::Database::create(dbfile.path())?;
+        let mut store = Store::from_database(database)?;
+        let author = Author::new(&mut rand::rng());
+        let author_id = store.initialize_default_author(author)?;
+        store.flush()?;
+        drop(store);
+
+        let database = redb::Database::create(dbfile.path())?;
+        let mut store = Store::from_database(database)?;
+        assert_eq!(store.default_author()?, Some(author_id));
         Ok(())
     }
 

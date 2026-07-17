@@ -5,17 +5,22 @@ use redb::{Database, ReadableTable, ReadableTableMetadata, TableHandle, WriteTra
 use tracing::{debug, info};
 
 use super::tables::{
-    LATEST_PER_AUTHOR_TABLE, NAMESPACES_TABLE, NAMESPACES_TABLE_V1, RECORDS_BY_KEY_TABLE,
-    RECORDS_TABLE,
+    AUTHORS_TABLE, CONFIG_TABLE, LATEST_PER_AUTHOR_TABLE, NAMESPACES_TABLE, NAMESPACES_TABLE_V1,
+    RECORDS_BY_KEY_TABLE, RECORDS_TABLE,
 };
-use crate::{Capability, NamespaceSecret};
+use crate::{AuthorId, Capability, NamespaceSecret};
+
+const DEFAULT_AUTHOR_KEY: &str = "default-author";
 
 /// Run all database migrations, if needed.
-pub fn run_migrations(db: &Database) -> Result<()> {
+pub fn run_migrations(db: &Database, default_author: Option<AuthorId>) -> Result<()> {
     run_migration(db, migration_001_populate_latest_table)?;
     run_migration(db, migration_002_namespaces_populate_v2)?;
     run_migration(db, migration_003_namespaces_delete_v1)?;
     run_migration(db, migration_004_populate_by_key_index)?;
+    run_migration(db, |tx| {
+        migration_005_import_default_author(tx, default_author)
+    })?;
     Ok(())
 }
 
@@ -114,6 +119,26 @@ fn migration_003_namespaces_delete_v1(tx: &WriteTransaction) -> Result<MigrateOu
         return Ok(MigrateOutcome::Skip);
     }
     tx.delete_table(NAMESPACES_TABLE_V1)?;
+    Ok(MigrateOutcome::Execute(1))
+}
+
+fn migration_005_import_default_author(
+    tx: &WriteTransaction,
+    default_author: Option<AuthorId>,
+) -> Result<MigrateOutcome> {
+    let mut config = tx.open_table(CONFIG_TABLE)?;
+    if config.get(DEFAULT_AUTHOR_KEY)?.is_some() {
+        return Ok(MigrateOutcome::Skip);
+    }
+    let Some(author) = default_author else {
+        return Ok(MigrateOutcome::Skip);
+    };
+    let authors = tx.open_table(AUTHORS_TABLE)?;
+    anyhow::ensure!(
+        authors.get(author.as_bytes())?.is_some(),
+        "The default author is missing from the docs store"
+    );
+    config.insert(DEFAULT_AUTHOR_KEY, author.as_bytes())?;
     Ok(MigrateOutcome::Execute(1))
 }
 

@@ -9,7 +9,7 @@ use iroh_gossip::net::Gossip;
 
 use crate::{
     api::DocsApi,
-    engine::{DefaultAuthorStorage, Engine, ProtectCallbackHandler},
+    engine::{Engine, ProtectCallbackHandler},
     store::Store,
 };
 
@@ -113,14 +113,11 @@ impl Builder {
         blobs: BlobsStore,
         gossip: Gossip,
     ) -> anyhow::Result<Docs> {
-        let (replica_store, author_store) = match self.storage {
-            Storage::Memory => (Store::memory(), DefaultAuthorStorage::Mem),
-            Storage::Custom(store) => (*store, DefaultAuthorStorage::Mem),
+        let replica_store = match self.storage {
+            Storage::Memory => Store::memory(),
+            Storage::Custom(store) => *store,
             #[cfg(feature = "fs-store")]
-            Storage::Persistent(path) => (
-                Store::persistent(path.join("docs.redb"))?,
-                DefaultAuthorStorage::Persistent(path.join("default-author")),
-            ),
+            Storage::Persistent(path) => Store::persistent(path.join("docs.redb"))?,
         };
         let downloader = blobs.downloader(&endpoint);
         let engine = Engine::spawn(
@@ -129,7 +126,6 @@ impl Builder {
             replica_store,
             blobs,
             downloader,
-            author_store,
             self.protect_cb,
         )
         .await?;
