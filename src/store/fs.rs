@@ -117,6 +117,11 @@ impl Store {
 
     fn memory_impl() -> Result<Self> {
         let db = Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
+        Self::from_database(db)
+    }
+
+    /// Create or open a store using a redb database.
+    pub fn from_database(db: Database) -> Result<Self> {
         Self::new_impl(db)
     }
 

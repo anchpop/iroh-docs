@@ -17,6 +17,7 @@ use crate::{
 enum Storage {
     #[default]
     Memory,
+    Custom(Box<Store>),
     #[cfg(feature = "fs-store")]
     Persistent(std::path::PathBuf),
 }
@@ -40,6 +41,14 @@ impl Docs {
     pub fn persistent(path: std::path::PathBuf) -> Builder {
         Builder {
             storage: Storage::Persistent(path),
+            protect_cb: None,
+        }
+    }
+
+    /// Create a builder using an already-open replica store.
+    pub fn with_store(store: Store) -> Builder {
+        Builder {
+            storage: Storage::Custom(Box::new(store)),
             protect_cb: None,
         }
     }
@@ -104,17 +113,14 @@ impl Builder {
         blobs: BlobsStore,
         gossip: Gossip,
     ) -> anyhow::Result<Docs> {
-        let replica_store = match &self.storage {
-            Storage::Memory => Store::memory(),
+        let (replica_store, author_store) = match self.storage {
+            Storage::Memory => (Store::memory(), DefaultAuthorStorage::Mem),
+            Storage::Custom(store) => (*store, DefaultAuthorStorage::Mem),
             #[cfg(feature = "fs-store")]
-            Storage::Persistent(path) => Store::persistent(path.join("docs.redb"))?,
-        };
-        let author_store = match &self.storage {
-            Storage::Memory => DefaultAuthorStorage::Mem,
-            #[cfg(feature = "fs-store")]
-            Storage::Persistent(path) => {
-                DefaultAuthorStorage::Persistent(path.join("default-author"))
-            }
+            Storage::Persistent(path) => (
+                Store::persistent(path.join("docs.redb"))?,
+                DefaultAuthorStorage::Persistent(path.join("default-author")),
+            ),
         };
         let downloader = blobs.downloader(&endpoint);
         let engine = Engine::spawn(
