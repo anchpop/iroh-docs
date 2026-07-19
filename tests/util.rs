@@ -95,7 +95,7 @@ impl Builder {
         let mut docs_builder = match self.storage {
             Storage::Memory => Docs::memory(),
             #[cfg(feature = "fs-store")]
-            Storage::Persistent(ref path) => Docs::persistent(path.to_path_buf()),
+            Storage::Persistent(ref path) => Docs::persistent(path.to_path_buf())?,
         };
         if let Some(protect_cb) = protect_cb {
             docs_builder = docs_builder.protect_handler(protect_cb);
