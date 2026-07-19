@@ -13,14 +13,6 @@ use crate::{
     store::Store,
 };
 
-#[derive(Default, Debug)]
-enum Storage {
-    #[default]
-    Memory,
-    #[cfg(feature = "fs-store")]
-    Persistent(std::path::PathBuf),
-}
-
 /// Docs protocol.
 #[derive(Debug, Clone)]
 pub struct Docs {
@@ -29,17 +21,28 @@ pub struct Docs {
 }
 
 impl Docs {
-    /// Create a new [`Builder`] for the docs protocol, using in memory replica and author storage.
+    /// Create a new [`Builder`] for the docs protocol, using an in-memory replica store.
     pub fn memory() -> Builder {
-        Builder::default()
+        Self::with_store(Store::memory())
     }
 
-    /// Create a new [`Builder`] for the docs protocol, using a persistent replica and author storage
+    /// Create a new [`Builder`] for the docs protocol, using a persistent replica store
     /// in the given directory.
+    ///
+    /// Returns an error if the store cannot be opened.
     #[cfg(feature = "fs-store")]
-    pub fn persistent(path: std::path::PathBuf) -> Builder {
+    pub fn persistent(path: std::path::PathBuf) -> anyhow::Result<Builder> {
+        Ok(Self::with_store(Store::persistent(path.join("docs.redb"))?))
+    }
+
+    /// Create a new [`Builder`] for the docs protocol, using a replica store
+    /// constructed by the caller.
+    ///
+    /// Use this when the store is backed by storage the builder cannot open
+    /// itself, e.g. a custom redb backend via [`Store::from_database`].
+    pub fn with_store(store: Store) -> Builder {
         Builder {
-            storage: Storage::Persistent(path),
+            store,
             protect_cb: None,
         }
     }
@@ -82,9 +85,9 @@ impl ProtocolHandler for Docs {
 }
 
 /// Builder for the docs protocol.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Builder {
-    storage: Storage,
+    store: Store,
     protect_cb: Option<ProtectCallbackHandler>,
 }
 
@@ -104,11 +107,7 @@ impl Builder {
         blobs: BlobsStore,
         gossip: Gossip,
     ) -> anyhow::Result<Docs> {
-        let replica_store = match self.storage {
-            Storage::Memory => Store::memory(),
-            #[cfg(feature = "fs-store")]
-            Storage::Persistent(path) => Store::persistent(path.join("docs.redb"))?,
-        };
+        let replica_store = self.store;
         let downloader = blobs.downloader(&endpoint);
         let engine = Engine::spawn(
             endpoint,
