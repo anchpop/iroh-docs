@@ -286,8 +286,11 @@ impl BobState {
     }
 
     /// Consume self and get the [`SyncOutcome`] for this connection.
+    ///
+    /// If [`Self::run`] failed, the progress state may have been consumed by the
+    /// failed sync round; an empty outcome is returned in that case.
     pub fn into_outcome(self) -> SyncOutcome {
-        self.progress.unwrap()
+        self.progress.unwrap_or_default()
     }
 }
 
@@ -305,6 +308,14 @@ mod tests {
         store::{self, Query, Store},
         AuthorId, NamespaceSecret,
     };
+
+    #[test]
+    fn outcome_after_failed_sync_does_not_panic() {
+        let mut state = BobState::new(SecretKey::generate().public());
+        // A failed sync_process_message leaves the progress state consumed.
+        state.progress = None;
+        let _ = state.into_outcome();
+    }
 
     #[tokio::test]
     async fn test_sync_simple() -> Result<()> {
